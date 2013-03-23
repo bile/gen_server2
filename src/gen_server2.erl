@@ -174,6 +174,10 @@
 %%%
 %%% ---------------------------------------------------
 
+% Compile options
+-compile({no_auto_import,[monitor/2]}).
+-compile(inline).
+
 %% API
 -export([start/3, start/4,
          start_link/3, start_link/4,
@@ -716,7 +720,7 @@ send_nodes(Nodes, Name, Tag, Req) ->
 
 send_nodes([Node|Tail], Name, Tag, Req, Monitors)
   when is_atom(Node) ->
-    Monitor = start_monitor(Node, Name),
+    Monitor = monitor(Node, Name),
     %% Handle non-existing names in rec_nodes.
     catch {Name, Node} ! {'$gen_call', {self(), {Tag, Node}}, Req},
     send_nodes(Tail, Name, Tag, Req, [Monitor | Monitors]);
@@ -741,11 +745,11 @@ rec_nodes(Tag, [{N,R}|Tail], Name, Badnodes, Replies, Time, TimerId ) ->
         {'DOWN', R, _, _, _} ->
             rec_nodes(Tag, Tail, Name, [N|Badnodes], Replies, Time, TimerId);
         {{Tag, N}, Reply} ->  %% Tag is bound !!!
-            unmonitor(R),
+            erlang:demonitor(R,[flush]),
             rec_nodes(Tag, Tail, Name, Badnodes,
                       [{N,Reply}|Replies], Time, TimerId);
         {timeout, TimerId, _} ->
-            unmonitor(R),
+            erlang:demonitor(R,[flush]),
             %% Collect all replies that already have arrived
             rec_nodes_rest(Tag, Tail, Name, [N|Badnodes], Replies)
     end;
@@ -768,10 +772,10 @@ rec_nodes_rest(Tag, [{N,R}|Tail], Name, Badnodes, Replies) ->
         {'DOWN', R, _, _, _} ->
             rec_nodes_rest(Tag, Tail, Name, [N|Badnodes], Replies);
         {{Tag, N}, Reply} -> %% Tag is bound !!!
-            unmonitor(R),
+            erlang:demonitor(R,[flush]),
             rec_nodes_rest(Tag, Tail, Name, Badnodes, [{N,Reply}|Replies])
     after 0 ->
-            unmonitor(R),
+            erlang:demonitor(R,[flush]),
             rec_nodes_rest(Tag, Tail, Name, [N|Badnodes], Replies)
     end;
 rec_nodes_rest(_Tag, [], _Name, Badnodes, Replies) ->
@@ -782,23 +786,13 @@ rec_nodes_rest(_Tag, [], _Name, Badnodes, Replies) ->
 %%% Monitor functions
 %%% ---------------------------------------------------
 
-start_monitor(Node, Name) when is_atom(Node), is_atom(Name) ->
+monitor(Node, Name) when is_atom(Node), is_atom(Name) ->
     if node() =:= nonode@nohost, Node =/= nonode@nohost ->
             Ref = make_ref(),
             self() ! {'DOWN', Ref, process, {Name, Node}, noconnection},
             {Node, Ref};
        true ->
             {Node,erlang:monitor(process, {Name, Node})}
-    end.
-
-%% Cancels a monitor started with Ref=erlang:monitor(_, _).
-unmonitor(Ref) when is_reference(Ref) ->
-    erlang:demonitor(Ref),
-    receive
-        {'DOWN', Ref, _, _, _} ->
-            true
-    after 0 ->
-            true
     end.
 
 %%% ---------------------------------------------------
