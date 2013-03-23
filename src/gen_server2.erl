@@ -749,34 +749,6 @@ rec_nodes(Tag, [{N,R}|Tail], Name, Badnodes, Replies, Time, TimerId ) ->
             %% Collect all replies that already have arrived
             rec_nodes_rest(Tag, Tail, Name, [N|Badnodes], Replies)
     end;
-rec_nodes(Tag, [N|Tail], Name, Badnodes, Replies, Time, TimerId) ->
-    %% R6 node
-    receive
-        {nodedown, N} ->
-            monitor_node(N, false),
-            rec_nodes(Tag, Tail, Name, [N|Badnodes], Replies, 2000, TimerId);
-        {{Tag, N}, Reply} ->  %% Tag is bound !!!
-            receive {nodedown, N} -> ok after 0 -> ok end,
-            monitor_node(N, false),
-            rec_nodes(Tag, Tail, Name, Badnodes,
-                      [{N,Reply}|Replies], 2000, TimerId);
-        {timeout, TimerId, _} ->
-            receive {nodedown, N} -> ok after 0 -> ok end,
-            monitor_node(N, false),
-            %% Collect all replies that already have arrived
-            rec_nodes_rest(Tag, Tail, Name, [N | Badnodes], Replies)
-    after Time ->
-            case rpc:call(N, erlang, whereis, [Name]) of
-                Pid when is_pid(Pid) -> % It exists try again.
-                    rec_nodes(Tag, [N|Tail], Name, Badnodes,
-                              Replies, infinity, TimerId);
-                _ -> % badnode
-                    receive {nodedown, N} -> ok after 0 -> ok end,
-                    monitor_node(N, false),
-                    rec_nodes(Tag, Tail, Name, [N|Badnodes],
-                              Replies, 2000, TimerId)
-            end
-    end;
 rec_nodes(_, [], _, Badnodes, Replies, _, TimerId) ->
     case catch erlang:cancel_timer(TimerId) of
         false ->  % It has already sent it's message
@@ -802,21 +774,6 @@ rec_nodes_rest(Tag, [{N,R}|Tail], Name, Badnodes, Replies) ->
             unmonitor(R),
             rec_nodes_rest(Tag, Tail, Name, [N|Badnodes], Replies)
     end;
-rec_nodes_rest(Tag, [N|Tail], Name, Badnodes, Replies) ->
-    %% R6 node
-    receive
-        {nodedown, N} ->
-            monitor_node(N, false),
-            rec_nodes_rest(Tag, Tail, Name, [N|Badnodes], Replies);
-        {{Tag, N}, Reply} ->  %% Tag is bound !!!
-            receive {nodedown, N} -> ok after 0 -> ok end,
-            monitor_node(N, false),
-            rec_nodes_rest(Tag, Tail, Name, Badnodes, [{N,Reply}|Replies])
-    after 0 ->
-            receive {nodedown, N} -> ok after 0 -> ok end,
-            monitor_node(N, false),
-            rec_nodes_rest(Tag, Tail, Name, [N|Badnodes], Replies)
-    end;
 rec_nodes_rest(_Tag, [], _Name, Badnodes, Replies) ->
     {Replies, Badnodes}.
 
@@ -831,14 +788,7 @@ start_monitor(Node, Name) when is_atom(Node), is_atom(Name) ->
             self() ! {'DOWN', Ref, process, {Name, Node}, noconnection},
             {Node, Ref};
        true ->
-            case catch erlang:monitor(process, {Name, Node}) of
-                {'EXIT', _} ->
-                    %% Remote node is R6
-                    monitor_node(Node, true),
-                    Node;
-                Ref when is_reference(Ref) ->
-                    {Node, Ref}
-            end
+            {Node,erlang:monitor(process, {Name, Node})}
     end.
 
 %% Cancels a monitor started with Ref=erlang:monitor(_, _).
