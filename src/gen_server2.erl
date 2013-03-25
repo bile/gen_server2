@@ -383,7 +383,6 @@ multi_call(Nodes, Name, Req, Timeout)
   when is_list(Nodes), is_atom(Name), is_integer(Timeout), Timeout >= 0 ->
     do_multi_call(Nodes, Name, Req, Timeout).
 
-
 %%-----------------------------------------------------------------
 %% enter_loop(Mod, Options, State, <ServerName>, <TimeOut>, <Backoff>) ->_
 %%
@@ -676,111 +675,95 @@ process_msg(Msg, GS2State = #gs2_state { name = Name, debug  = Debug }) ->
 do_send(Dest, Msg) ->
     catch erlang:send(Dest, Msg).
 
-do_multi_call(Nodes, Name, Req, infinity) ->
-    Tag = make_ref(),
-    Monitors = send_nodes(Nodes, Name, Tag, Req),
-    rec_nodes(Tag, Monitors, Name, undefined);
 do_multi_call(Nodes, Name, Req, Timeout) ->
     Tag = make_ref(),
     Caller = self(),
-    Receiver =
-        spawn(
-          fun () ->
-                  %% Middleman process. Should be unsensitive to regular
-                  %% exit signals. The sychronization is needed in case
-                  %% the receiver would exit before the caller started
-                  %% the monitor.
-                  process_flag(trap_exit, true),
-                  Mref = erlang:monitor(process, Caller),
+    Fun = fun () ->
+                  erlang:process_flag(trap_exit, true),
+                  MRef = erlang:monitor(process, Caller),
                   receive
-                      {Caller,Tag} ->
+                      {Tag,Caller,infinity} ->
+                          Monitors = send_nodes(Nodes, Name, Tag, Req),
+                          Result   = rec_nodes(Tag, Monitors, Name, undefined),
+                          erlang:exit({self(),Tag,Result});
+                      {Tag,Caller,Timeout} ->
                           Monitors = send_nodes(Nodes, Name, Tag, Req),
                           TimerId = erlang:start_timer(Timeout, self(), ok),
                           Result = rec_nodes(Tag, Monitors, Name, TimerId),
-                          exit({self(),Tag,Result});
-                      {'DOWN',Mref,_,_,_} ->
-                          %% Caller died before sending us the go-ahead.
-                          %% Give up silently.
-                          exit(normal)
+                          erlang:exit({self(),Tag,Result});
+                      {'DOWN',MRef,_,_,_} ->
+                          erlang:exit(normal)
                   end
-          end),
-    Mref = erlang:monitor(process, Receiver),
-    Receiver ! {self(),Tag},
+          end,
+    {Receiver,MRef} = erlang:spawn_monitor(Fun),
+    Receiver ! {Tag,Caller,Timeout},
     receive
-        {'DOWN',Mref,_,_,{Receiver,Tag,Result}} ->
+        {'DOWN',MRef,_,_,{Receiver,Tag,Result}} ->
             Result;
-        {'DOWN',Mref,_,_,Reason} ->
+        {'DOWN',MRef,_,_,Reason} ->
             %% The middleman code failed. Or someone did
             %% exit(_, kill) on the middleman process => Reason==killed
-            exit(Reason)
+            erlang:exit(Reason)
     end.
 
 send_nodes(Nodes, Name, Tag, Req) ->
-    send_nodes(Nodes, Name, Tag, Req, []).
+    send_nodes(Nodes, Name, Tag, Req, dict:new()).
 
-send_nodes([Node|Tail], Name, Tag, Req, Monitors)
+send_nodes([Node|Tail], Name, Tag, Req, MonitorRefs)
   when is_atom(Node) ->
-    Monitor = monitor(Node, Name),
-    %% Handle non-existing names in rec_nodes.
-    catch {Name, Node} ! {'$gen_call', {self(), {Tag, Node}}, Req},
-    send_nodes(Tail, Name, Tag, Req, [Monitor | Monitors]);
-send_nodes([_Node|Tail], Name, Tag, Req, Monitors) ->
-    %% Skip non-atom Node
-    send_nodes(Tail, Name, Tag, Req, Monitors);
-send_nodes([], _Name, _Tag, _Req, Monitors) ->
-    Monitors.
-
-%% Against old nodes:
-%% If no reply has been delivered within 2 secs. (per node) check that
-%% the server really exists and wait for ever for the answer.
-%%
-%% Against contemporary nodes:
-%% Wait for reply, server 'DOWN', or timeout from TimerId.
-
-rec_nodes(Tag, Nodes, Name, TimerId) ->
-    rec_nodes(Tag, Nodes, Name, [], [], 2000, TimerId).
-
-rec_nodes(Tag, [{N,R}|Tail], Name, Badnodes, Replies, Time, TimerId ) ->
-    receive
-        {'DOWN', R, _, _, _} ->
-            rec_nodes(Tag, Tail, Name, [N|Badnodes], Replies, Time, TimerId);
-        {{Tag, N}, Reply} ->  %% Tag is bound !!!
-            erlang:demonitor(R,[flush]),
-            rec_nodes(Tag, Tail, Name, Badnodes,
-                      [{N,Reply}|Replies], Time, TimerId);
-        {timeout, TimerId, _} ->
-            erlang:demonitor(R,[flush]),
-            %% Collect all replies that already have arrived
-            rec_nodes_rest(Tag, Tail, Name, [N|Badnodes], Replies)
+    case dict:is_key(Node,MonitorRefs) of
+        false ->
+            {Node,Ref} = monitor(Node, Name),
+            catch {Name, Node} ! {'$gen_call', {self(), {Tag, Node}}, Req},
+            NewMonitorRefs = dict:store(Node,Ref,MonitorRefs),
+            send_nodes(Tail, Name, Tag, Req, NewMonitorRefs);
+        true ->
+            send_nodes(Tail, Name, Tag, Req, MonitorRefs)
     end;
-rec_nodes(_, [], _, Badnodes, Replies, _, TimerId) ->
-    case catch erlang:cancel_timer(TimerId) of
-        false ->  % It has already sent it's message
+send_nodes([_Node|Tail], Name, Tag, Req, MonitorRefs) ->
+    send_nodes(Tail, Name, Tag, Req, MonitorRefs);
+send_nodes([], _Name, _Tag, _Req, MonitorRefs) ->
+    MonitorRefs.
+
+rec_nodes(Tag, MonitorRefs, Name, TimerId) ->
+    rec_nodes(Tag, MonitorRefs, Name, [], [], TimerId).
+
+rec_nodes(Tag, MonitorRefs, Name, Badnodes, Replies, TimerId)
+  when element(2,MonitorRefs) > 0 ->
+    receive
+        {{Tag, Node}, Reply} ->  %% Tag is bound !!!
+            {ok,Ref} = dict:find(Node,MonitorRefs),
+            NewMonitorRefs = dict:erase(Node,MonitorRefs),
+            erlang:demonitor(Ref,[flush]),
+            rec_nodes(Tag, NewMonitorRefs, Name, Badnodes,
+                      [{Node,Reply}|Replies], TimerId);
+        {'DOWN', _Ref, _, {_,Node}, _} ->
+            NewMonitorRefs = dict:erase(Node,MonitorRefs),
+            rec_nodes(Tag, NewMonitorRefs, Name, [Node|Badnodes], Replies, TimerId);
+        {timeout, TimerId, ok} ->
+            Fun = fun(Node,Ref,Acc) ->
+                          erlang:demonitor(Ref,[flush]),
+                          [Node|Acc]
+                  end,
+            NewBadnodes = dict:fold(Fun,Badnodes,MonitorRefs),
+            {Replies,NewBadnodes}
+    end;
+rec_nodes(_, _, _, Badnodes, Replies, TimerId)
+  when is_reference(TimerId) ->
+    case erlang:cancel_timer(TimerId) of
+        false ->
             receive
-                {timeout, TimerId, _} -> ok
+                {timeout, TimerId, ok} ->
+                    ok
             after 0 ->
                     ok
             end;
-        _ -> % Timer was cancelled, or TimerId was 'undefined'
+        _ ->
             ok
     end,
+    {Replies, Badnodes};
+rec_nodes(_, _, _, Badnodes, Replies, _) ->
     {Replies, Badnodes}.
-
-%% Collect all replies that already have arrived
-rec_nodes_rest(Tag, [{N,R}|Tail], Name, Badnodes, Replies) ->
-    receive
-        {'DOWN', R, _, _, _} ->
-            rec_nodes_rest(Tag, Tail, Name, [N|Badnodes], Replies);
-        {{Tag, N}, Reply} -> %% Tag is bound !!!
-            erlang:demonitor(R,[flush]),
-            rec_nodes_rest(Tag, Tail, Name, Badnodes, [{N,Reply}|Replies])
-    after 0 ->
-            erlang:demonitor(R,[flush]),
-            rec_nodes_rest(Tag, Tail, Name, [N|Badnodes], Replies)
-    end;
-rec_nodes_rest(_Tag, [], _Name, Badnodes, Replies) ->
-    {Replies, Badnodes}.
-
 
 %%% ---------------------------------------------------
 %%% Monitor functions
