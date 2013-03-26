@@ -713,7 +713,7 @@ send_nodes([Node|Tail], Name, Tag, Req, MonitorRefs)
   when is_atom(Node) ->
     case dict:is_key(Node,MonitorRefs) of
         false ->
-            {Node,Ref} = monitor(Node, Name),
+            Ref = monitor(Node, Name),
             catch {Name, Node} ! {'$gen_call', {self(), {Tag, Node}}, Req},
             NewMonitorRefs = dict:store(Node,Ref,MonitorRefs),
             send_nodes(Tail, Name, Tag, Req, NewMonitorRefs);
@@ -773,9 +773,9 @@ monitor(Node, Name) when is_atom(Node), is_atom(Name) ->
     if node() =:= nonode@nohost, Node =/= nonode@nohost ->
             Ref = make_ref(),
             self() ! {'DOWN', Ref, process, {Name, Node}, noconnection},
-            {Node, Ref};
+            Ref;
        true ->
-            {Node,erlang:monitor(process, {Name, Node})}
+            erlang:monitor(process, {Name, Node})
     end.
 
 %%% ---------------------------------------------------
