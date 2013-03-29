@@ -679,6 +679,7 @@ do_multi_call(Nodes, Name, Req, Timeout) ->
     Tag = make_ref(),
     Caller = self(),
     Fun = fun () ->
+                  erlang:process_flag(priority, high),
                   erlang:process_flag(trap_exit, true),
                   MRef = erlang:monitor(process, Caller),
                   receive
@@ -707,45 +708,46 @@ do_multi_call(Nodes, Name, Req, Timeout) ->
     end.
 
 send_nodes(Nodes, Name, Tag, Req) ->
-    send_nodes(Nodes, Name, Tag, Req, dict:new()).
+    send_nodes(Nodes, Name, Tag, Req, 0).
 
-send_nodes([Node|Tail], Name, Tag, Req, MonitorRefs)
+send_nodes([Node|Tail], Name, Tag, Req, Count)
   when is_atom(Node) ->
-    case dict:is_key(Node,MonitorRefs) of
-        false ->
+    case erlang:get(Node) of
+        undefined ->
             Ref = monitor(Node, Name),
+            erlang:put(Node,Ref),
             catch {Name, Node} ! {'$gen_call', {self(), {Tag, Node}}, Req},
-            NewMonitorRefs = dict:store(Node,Ref,MonitorRefs),
-            send_nodes(Tail, Name, Tag, Req, NewMonitorRefs);
-        true ->
-            send_nodes(Tail, Name, Tag, Req, MonitorRefs)
+            send_nodes(Tail, Name, Tag, Req, Count+1);
+        _ ->
+            send_nodes(Tail, Name, Tag, Req, Count)
     end;
-send_nodes([_Node|Tail], Name, Tag, Req, MonitorRefs) ->
-    send_nodes(Tail, Name, Tag, Req, MonitorRefs);
-send_nodes([], _Name, _Tag, _Req, MonitorRefs) ->
-    MonitorRefs.
+send_nodes([_Node|Tail], Name, Tag, Req, Count) ->
+    send_nodes(Tail, Name, Tag, Req, Count);
+send_nodes([], _Name, _Tag, _Req, Count) ->
+    Count.
 
-rec_nodes(Tag, MonitorRefs, Name, TimerId) ->
-    rec_nodes(Tag, MonitorRefs, Name, [], [], TimerId).
+rec_nodes(Tag, Count, Name, TimerId) ->
+    rec_nodes(Tag, Count, Name, [], [], TimerId).
 
-rec_nodes(Tag, MonitorRefs, Name, Badnodes, Replies, TimerId)
-  when element(2,MonitorRefs) > 0 ->
+rec_nodes(Tag, Count, Name, Badnodes, Replies, TimerId)
+  when Count > 0 ->
     receive
-        {{Tag, Node}, Reply} ->  %% Tag is bound !!!
-            {ok,Ref} = dict:find(Node,MonitorRefs),
-            NewMonitorRefs = dict:erase(Node,MonitorRefs),
+        {{Tag, Node}, Reply} ->
+            Ref = erlang:erase(Node),
             erlang:demonitor(Ref,[flush]),
-            rec_nodes(Tag, NewMonitorRefs, Name, Badnodes,
+            rec_nodes(Tag, Count-1, Name, Badnodes,
                       [{Node,Reply}|Replies], TimerId);
         {'DOWN', _Ref, _, {_,Node}, _} ->
-            NewMonitorRefs = dict:erase(Node,MonitorRefs),
-            rec_nodes(Tag, NewMonitorRefs, Name, [Node|Badnodes], Replies, TimerId);
+            erlang:erase(Node),
+            rec_nodes(Tag, Count-1, Name, [Node|Badnodes], Replies, TimerId);
         {timeout, TimerId, ok} ->
-            Fun = fun(Node,Ref,Acc) ->
+            Fun = fun({Node,Ref},Acc)
+                     when is_atom(Node),is_reference(Ref) ->
                           erlang:demonitor(Ref,[flush]),
                           [Node|Acc]
                   end,
-            NewBadnodes = dict:fold(Fun,Badnodes,MonitorRefs),
+            MonitorRefs = erlang:get(),
+            NewBadnodes = lists:foldl(Fun,Badnodes,MonitorRefs),
             {Replies,NewBadnodes}
     end;
 rec_nodes(_, _, _, Badnodes, Replies, TimerId)
