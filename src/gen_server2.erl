@@ -487,21 +487,21 @@ init_it(Starter, Parent, Name0, Mod, Args, Options) ->
             exit(Error)
     end.
 
-name({local,Name}) -> Name;
-name({global,Name}) -> Name;
-%% name(Pid) when is_pid(Pid) -> Pid;
-%% when R12 goes away, drop the line beneath and uncomment the line above
-name(Name) -> Name.
+name({local,Name}) ->
+    Name;
+name({global,Name}) ->
+    Name;
+name(Pid)
+  when is_pid(Pid) ->
+    Pid.
 
 unregister_name({local,Name}) ->
     _ = (catch unregister(Name));
 unregister_name({global,Name}) ->
     _ = global:unregister_name(Name);
-unregister_name(Pid) when is_pid(Pid) ->
-    Pid;
-%% Under R12 let's just ignore it, as we have a single term as Name.
-%% On R13 it will never get here, as we get tuple with 'local/global' atom.
-unregister_name(_Name) -> ok.
+unregister_name(Pid)
+  when is_pid(Pid) ->
+    Pid.
 
 extend_backoff(undefined) ->
     undefined;
